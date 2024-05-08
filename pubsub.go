@@ -14,9 +14,8 @@ type Subscriber[T any] struct {
 }
 
 type pipeSub[T any] struct {
-	filter func(T) bool
-	queue  chan<- T // unbounded FIFO queue
-	stop   chan struct{}
+	queue chan<- T // unbounded FIFO queue
+	stop  chan struct{}
 }
 
 // NewSubscriber creates a new Subscriber.
@@ -51,17 +50,13 @@ func (s *Subscriber[T]) publish(ctx context.Context, value T) {
 	defer s.mu.RUnlock()
 
 	for _, sub := range s.subs {
-		if !sub.filter(value) {
-			continue
-		}
-
 		// We're ok with waiting for sub.queue to accept the value, since
 		// they go to unbounded queues.
 		select {
 		case <-ctx.Done():
 			return
 		case <-sub.stop:
-			return
+			break
 		case sub.queue <- value:
 			// ok
 		}
@@ -99,6 +94,11 @@ func (s *Subscriber[T]) Subscribe(ch chan<- T, filter FilterFunc[T]) {
 	queue := make(chan T, 1)
 	stop := make(chan struct{})
 
+	s.subs[ch] = pipeSub[T]{
+		queue: queue,
+		stop:  stop,
+	}
+
 	go func() {
 		var dst chan<- T
 		pending := NewQueue[T]()
@@ -106,6 +106,9 @@ func (s *Subscriber[T]) Subscribe(ch chan<- T, filter FilterFunc[T]) {
 		for {
 			select {
 			case msg := <-queue:
+				if !filter(msg) {
+					break
+				}
 				pending.Enqueue(msg)
 				dst = ch
 
@@ -122,12 +125,6 @@ func (s *Subscriber[T]) Subscribe(ch chan<- T, filter FilterFunc[T]) {
 			}
 		}
 	}()
-
-	s.subs[ch] = pipeSub[T]{
-		filter: filter,
-		queue:  queue,
-		stop:   stop,
-	}
 }
 
 // Unsubscribe unsubscribes ch from incoming messages from all its recipients.
